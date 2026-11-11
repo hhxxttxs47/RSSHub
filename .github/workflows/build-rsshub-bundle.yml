@@ -1,0 +1,80 @@
+# 放到你自己 fork 的 RSSHub 仓库：.github/workflows/build-rsshub-bundle.yml
+# 作用：在 GitHub Actions 上把 RSSHub 构建成「dist + node_modules」的单个压缩包，
+#       避免在 2GB 磁盘 / 500 CPU 秒的免费容器里编译。
+
+name: build-rsshub-bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "RSSHub 的分支 / tag / commit"
+        required: false
+        default: master
+  push:
+    tags:
+      - "bundle-*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout RSSHub
+        uses: actions/checkout@v4
+        with:
+          repository: DIYgod/RSSHub
+          ref: ${{ github.event.inputs.ref || 'master' }}
+          fetch-depth: 1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # RSSHub 用 pnpm 12；若仓库 package.json 里没写 packageManager，这里必须指定
+          version: 12
+          run_install: false
+
+      - name: Setup Node 26
+        uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+
+      - name: Install (dev, 需要构建工具)
+        run: pnpm i --frozen-lockfile
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+
+      - name: Build
+        run: pnpm build
+        env:
+          NODE_OPTIONS: "--max-old-space-size=6144"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+      - name: Prune to production deps
+        run: pnpm i --prod --frozen-lockfile --ignore-scripts
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+
+      - name: Pack bundle
+        run: |
+          rm -rf .git
+          # assets/build/*.json 是路由表，运行时可能被引用；public 是首页静态资源
+          tar -czf rsshub-bundle.tar.gz dist node_modules package.json assets/build public
+          echo "--- 包大小 ---"
+          ls -lh rsshub-bundle.tar.gz
+          echo "--- 解压后占用 ---"
+          du -sh dist node_modules assets/build public
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsshub-bundle
+          path: rsshub-bundle.tar.gz
+          retention-days: 7
+
+      - name: Attach to release (tag 触发时)
+        if: startsWith(github.ref, 'refs/tags/bundle-')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rsshub-bundle.tar.gz
